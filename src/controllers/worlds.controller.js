@@ -231,3 +231,198 @@ export const getWorldLogs = async (req, res, next) => {
         next(error)
     }
 }
+
+export const streamWorldLogs = async (req, res) => {
+    const { id } = req.params
+    const { tail = 50 } = req.query
+
+    if (!id || id.trim() === '') {
+        return res.status(400).json({
+            success: false,
+            message: 'World id is required'
+        })
+    }
+
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.setHeader('Cache-Control', 'no-cache')
+    res.setHeader('Connection', 'keep-alive')
+    res.setHeader('X-Accel-Buffering', 'no')
+    res.flushHeaders()
+
+    controllerLogger.info(`Starting SSE log stream for world '${id}'`)
+
+    res.write(`event: connected\ndata: ${JSON.stringify({ message: `Connected to logs for world '${id}'` })}\n\n`)
+
+    let stream = null
+
+    try {
+        stream = await dockerService.streamWorldLogs(
+            id.trim(),
+            (line, type) => {
+                const data = JSON.stringify({ 
+                    timestamp: new Date().toISOString(),
+                    type,
+                    message: line 
+                })
+                res.write(`event: log\ndata: ${data}\n\n`)
+            },
+            (error) => {
+                res.write(`event: error\ndata: ${JSON.stringify({ error: error.message })}\n\n`)
+            },
+            parseInt(tail, 10) || 50
+        )
+    } catch (error) {
+        if (error.code === 'WORLD_NOT_FOUND') {
+            res.write(`event: error\ndata: ${JSON.stringify({ error: error.message })}\n\n`)
+            return res.end()
+        }
+        res.write(`event: error\ndata: ${JSON.stringify({ error: error.message })}\n\n`)
+        return res.end()
+    }
+
+    req.on('close', () => {
+        controllerLogger.info(`Client disconnected from log stream for world '${id}'`)
+        if (stream) {
+            stream.kill()
+        }
+    })
+}
+
+export const createWorldWithStream = async (req, res) => {
+    const { id, memory, cpus, port } = req.body
+
+    const missingFields = []
+    if (!id) missingFields.push('id')
+    if (!memory) missingFields.push('memory')
+    if (!cpus) missingFields.push('cpus')
+    if (!port) missingFields.push('port')
+
+    if (missingFields.length > 0) {
+        return res.status(400).json({
+            success: false,
+            message: 'Missing required fields',
+            missingFields
+        })
+    }
+
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.setHeader('Cache-Control', 'no-cache')
+    res.setHeader('Connection', 'keep-alive')
+    res.setHeader('X-Accel-Buffering', 'no')
+    res.flushHeaders()
+
+    controllerLogger.info(`Creating world '${id}' with streaming`)
+
+    res.write(`event: status\ndata: ${JSON.stringify({ status: 'creating', message: 'Starting world creation...' })}\n\n`)
+
+    let logStream = null
+
+    try {
+        const result = await dockerService.createWorldWithLogs(
+            { id: id.trim(), memory, cpus, port },
+            (line, type) => {
+                res.write(`event: log\ndata: ${JSON.stringify({ type, message: line })}\n\n`)
+            },
+            (error) => {
+                res.write(`event: error\ndata: ${JSON.stringify({ error: error.message })}\n\n`)
+            }
+        )
+
+        res.write(`event: status\ndata: ${JSON.stringify({ status: 'created', message: 'World created, starting log stream...' })}\n\n`)
+
+        logStream = await dockerService.streamWorldLogs(
+            id.trim(),
+            (line, type) => {
+                const data = JSON.stringify({
+                    timestamp: new Date().toISOString(),
+                    type,
+                    message: line
+                })
+                res.write(`event: log\ndata: ${data}\n\n`)
+            },
+            (error) => {
+                res.write(`event: error\ndata: ${JSON.stringify({ error: error.message })}\n\n`)
+            },
+            0
+        )
+
+    } catch (error) {
+        if (error.code === 'WORLD_ALREADY_EXISTS') {
+            res.write(`event: error\ndata: ${JSON.stringify({ error: error.message, code: 'WORLD_ALREADY_EXISTS' })}\n\n`)
+            return res.end()
+        }
+        res.write(`event: error\ndata: ${JSON.stringify({ error: error.message })}\n\n`)
+        return res.end()
+    }
+
+    req.on('close', () => {
+        controllerLogger.info(`Client disconnected from creation stream for world '${id}'`)
+        if (logStream) {
+            logStream.kill()
+        }
+    })
+}
+
+export const startWorldWithStream = async (req, res) => {
+    const { id } = req.params
+
+    if (!id || id.trim() === '') {
+        return res.status(400).json({
+            success: false,
+            message: 'World id is required'
+        })
+    }
+
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.setHeader('Cache-Control', 'no-cache')
+    res.setHeader('Connection', 'keep-alive')
+    res.setHeader('X-Accel-Buffering', 'no')
+    res.flushHeaders()
+
+    controllerLogger.info(`Starting world '${id}' with streaming`)
+
+    res.write(`event: status\ndata: ${JSON.stringify({ status: 'starting', message: 'Starting world...' })}\n\n`)
+
+    let logStream = null
+
+    try {
+        await dockerService.startWorld(id.trim())
+        
+        res.write(`event: status\ndata: ${JSON.stringify({ status: 'started', message: 'World started, streaming logs...' })}\n\n`)
+
+        logStream = await dockerService.streamWorldLogs(
+            id.trim(),
+            (line, type) => {
+                const data = JSON.stringify({
+                    timestamp: new Date().toISOString(),
+                    type,
+                    message: line
+                })
+                res.write(`event: log\ndata: ${data}\n\n`)
+            },
+            (error) => {
+                res.write(`event: error\ndata: ${JSON.stringify({ error: error.message })}\n\n`)
+            },
+            20
+        )
+
+    } catch (error) {
+        if (error.code === 'WORLD_NOT_FOUND') {
+            res.write(`event: error\ndata: ${JSON.stringify({ error: error.message, code: 'WORLD_NOT_FOUND' })}\n\n`)
+            return res.end()
+        }
+        if (error.code === 'WORLD_ALREADY_RUNNING') {
+            res.write(`event: error\ndata: ${JSON.stringify({ error: error.message, code: 'WORLD_ALREADY_RUNNING' })}\n\n`)
+            return res.end()
+        }
+        res.write(`event: error\ndata: ${JSON.stringify({ error: error.message })}\n\n`)
+        return res.end()
+    }
+
+    req.on('close', () => {
+        controllerLogger.info(`Client disconnected from start stream for world '${id}'`)
+        if (logStream) {
+            logStream.kill()
+        }
+    })
+}
