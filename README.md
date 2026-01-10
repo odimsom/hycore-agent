@@ -1,6 +1,6 @@
 # HyCore Agent
 
-Node.js agent for managing Minecraft worlds via Docker containers.
+Node.js agent for managing Hytale worlds via Docker containers.
 
 ## Features
 
@@ -26,7 +26,7 @@ npm start
 | `PORT` | Server port | `3000` |
 | `NODE_ENV` | Environment (development/production) | `development` |
 | `WORLDS_PATH` | Path to store world data | Required |
-| `DOCKER_IMAGE` | Minecraft Docker image | Required |
+| `DOCKER_IMAGE` | Hytale Docker image | Required |
 | `LOG_LEVEL` | Log level (error/warn/info/debug/trace) | `info` |
 | `LOG_TO_FILE` | Enable file logging | `false` |
 | `LOG_FILE_PATH` | Directory for log files | `./logs` |
