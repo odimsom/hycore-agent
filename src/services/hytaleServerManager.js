@@ -1,7 +1,10 @@
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import { EventEmitter } from 'events';
 import fs from 'fs/promises';
+import { existsSync } from 'fs';
 import path from 'path';
+import os from 'os';
+import hytaleFilesManager from './hytaleFilesManager.js';
 
 class HytaleServerManager extends EventEmitter {
   constructor() {
@@ -9,25 +12,79 @@ class HytaleServerManager extends EventEmitter {
     this.servers = new Map();
     this.defaultPort = 5520;
     this.defaultJvmArgs = ['-Xms2G', '-Xmx4G'];
+    this.javaPath = this.findJava25Path();
   }
 
   /**
-   * Verify Java 25 installation
+   * Find Java 25 path - checks SDKMAN, system paths, and common locations
+   */
+  findJava25Path() {
+    const home = os.homedir();
+    
+    // Possible Java 25 locations
+    const possiblePaths = [
+      // SDKMAN paths
+      path.join(home, '.sdkman', 'candidates', 'java', 'current', 'bin', 'java'),
+      path.join(home, '.sdkman', 'candidates', 'java', '25-open', 'bin', 'java'),
+      path.join(home, '.sdkman', 'candidates', 'java', '25.0.1-open', 'bin', 'java'),
+      path.join(home, '.sdkman', 'candidates', 'java', '25.0.1-tem', 'bin', 'java'),
+      // System paths
+      '/opt/java/jdk-25/bin/java',
+      '/usr/lib/jvm/java-25-openjdk/bin/java',
+      '/usr/lib/jvm/temurin-25-jdk/bin/java',
+      // Default (system java)
+      'java'
+    ];
+
+    for (const javaPath of possiblePaths) {
+      try {
+        if (javaPath === 'java' || existsSync(javaPath)) {
+          // Verify it's Java 25+
+          const version = execSync(`"${javaPath}" -version 2>&1`, { encoding: 'utf8' });
+          if (version.includes('25.') || version.includes('version "25')) {
+            console.log(`[HytaleServerManager] Found Java 25 at: ${javaPath}`);
+            return javaPath;
+          }
+        }
+      } catch (e) {
+        // Continue to next path
+      }
+    }
+
+    console.warn('[HytaleServerManager] Java 25 not found, using system java');
+    return 'java';
+  }
+
+  /**
+   * Obtener rutas por defecto para un servidor
+   */
+  getDefaultServerPaths(serverId) {
+    const defaults = hytaleFilesManager.getDefaultPaths();
+    return {
+      serverPath: path.join(defaults.serversPath, serverId),
+      assetsPath: defaults.assetsPath,
+      backupDir: path.join(defaults.backupsPath, serverId)
+    };
+  }
+
+  /**
+   * Verify Java installation
    */
   async verifyJava() {
     return new Promise((resolve, reject) => {
-      const java = spawn('java', ['--version']);
+      const javaCmd = this.javaPath;
+      const process = spawn(javaCmd, ['--version'], { shell: true });
       let output = '';
 
-      java.stdout.on('data', (data) => {
+      process.stdout.on('data', (data) => {
         output += data.toString();
       });
 
-      java.stderr.on('data', (data) => {
+      process.stderr.on('data', (data) => {
         output += data.toString();
       });
 
-      java.on('close', (code) => {
+      process.on('close', (code) => {
         if (code !== 0) {
           return reject(new Error('Java not found. Please install Java 25 (Adoptium recommended).'));
         }
@@ -49,21 +106,24 @@ class HytaleServerManager extends EventEmitter {
   /**
    * Start a Hytale server instance
    */
-  async startServer(serverId, config) {
+  async startServer(serverId, config = {}) {
     if (this.servers.has(serverId)) {
       throw new Error(`Server ${serverId} is already running`);
     }
 
+    // Obtener rutas por defecto si no se proporcionan
+    const defaultPaths = this.getDefaultServerPaths(serverId);
+
     const {
-      serverPath,
-      assetsPath,
+      serverPath = defaultPaths.serverPath,
+      assetsPath = defaultPaths.assetsPath,
       port = this.defaultPort,
       jvmArgs = this.defaultJvmArgs,
       authMode = 'authenticated',
       aotCache = true,
       disableSentry = false,
       backup = false,
-      backupDir,
+      backupDir = defaultPaths.backupDir,
       backupFrequency = 30
     } = config;
 
@@ -95,23 +155,21 @@ class HytaleServerManager extends EventEmitter {
       args.push('--disable-sentry');
     }
 
-    if (backup) {
+    if (backup && backupDir) {
       args.push('--backup');
-      if (backupDir) {
-        args.push('--backup-dir', backupDir);
-      }
+      args.push('--backup-dir', backupDir);
       args.push('--backup-frequency', backupFrequency.toString());
     }
 
-    // Spawn server process
-    const serverProcess = spawn('java', args, {
+    // Spawn the server process using found Java 25 path
+    const process = spawn(this.javaPath, args, {
       cwd: serverPath,
       stdio: ['pipe', 'pipe', 'pipe']
     });
 
     const serverInstance = {
       id: serverId,
-      process: serverProcess,
+      process: process,
       config,
       port,
       startTime: Date.now(),
@@ -119,7 +177,7 @@ class HytaleServerManager extends EventEmitter {
       logs: []
     };
 
-    serverProcess.stdout.on('data', (data) => {
+    process.stdout.on('data', (data) => {
       const log = data.toString();
       serverInstance.logs.push({ type: 'stdout', message: log, timestamp: Date.now() });
       this.emit('log', serverId, 'stdout', log);
@@ -134,20 +192,20 @@ class HytaleServerManager extends EventEmitter {
       }
     });
 
-    serverProcess.stderr.on('data', (data) => {
+    process.stderr.on('data', (data) => {
       const log = data.toString();
       serverInstance.logs.push({ type: 'stderr', message: log, timestamp: Date.now() });
       this.emit('log', serverId, 'stderr', log);
     });
 
-    serverProcess.on('close', (code) => {
+    process.on('close', (code) => {
       serverInstance.status = 'stopped';
       serverInstance.exitCode = code;
       this.servers.delete(serverId);
       this.emit('stopped', serverId, code);
     });
 
-    serverProcess.on('error', (err) => {
+    process.on('error', (err) => {
       serverInstance.status = 'error';
       this.emit('error', serverId, err);
     });
