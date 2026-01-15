@@ -4,7 +4,9 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 import dotenv from 'dotenv';
 import hytaleRoutes from './routes/hytaleRoutes.js';
+import setupRoutes from './routes/setupRoutes.js';
 import hytaleServerManager from './services/hytaleServerManager.js';
+import hytaleFilesManager from './services/hytaleFilesManager.js';
 
 dotenv.config();
 
@@ -40,6 +42,14 @@ app.get('/api', (req, res) => {
     description: 'Hytale Dedicated Server Management Agent',
     endpoints: {
       health: 'GET /health',
+      setup: {
+        status: 'GET /api/v1/setup/status',
+        copyFiles: 'POST /api/v1/setup/copy-files',
+        createServer: 'POST /api/v1/setup/create-server',
+        listServers: 'GET /api/v1/setup/servers',
+        paths: 'GET /api/v1/setup/paths',
+        checkLauncher: 'GET /api/v1/setup/check-launcher'
+      },
       servers: {
         list: 'GET /api/v1/servers',
         start: 'POST /api/v1/servers/:id/start',
@@ -80,6 +90,7 @@ app.get('/api', (req, res) => {
 
 // API Routes
 app.use('/api/v1', hytaleRoutes);
+app.use('/api/v1/setup', setupRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
